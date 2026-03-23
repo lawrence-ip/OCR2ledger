@@ -1,0 +1,49 @@
+# docker-compose.yml – OCR2Ledger
+# =================================
+# Prerequisites:
+#   1. Docker Desktop installed (https://www.docker.com/products/docker-desktop/)
+#   2. A config.ini file in this directory (copy from config.ini.example)
+#   3. Google credentials available (Application Default Credentials or a
+#      service-account JSON key file)
+#
+# Quick start (Windows PowerShell / Command Prompt):
+#   docker compose up
+#
+# To force a fresh rebuild of the image:
+#   docker compose up --build
+
+services:
+  ocr2ledger:
+    build: .
+    image: ocr2ledger:latest
+
+    # Mount local folders into the container.
+    # Adjust the host-side paths (left of ':') to match your setup.
+    volumes:
+      # PDF input folder  (read-only inside the container)
+      - ./invoices:/data/invoices:ro
+      # CSV output folder
+      - ./output:/data/output
+      # Raw JSON output (only written when save_json = true in config.ini)
+      - ./json_output:/data/json_output
+      # Config file (read-only)
+      - ./config.ini:/app/config.ini:ro
+      # Google Application Default Credentials
+      # Windows path: %APPDATA%\gcloud  →  use full path here, e.g.:
+      #   - C:\Users\YourName\AppData\Roaming\gcloud:/root/.config/gcloud:ro
+      # Linux / macOS:
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+
+    # Optional: pass a service-account key file via environment variable
+    # instead of Application Default Credentials.
+    # environment:
+    #   - GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-key
+    # secrets:
+    #   - gcp-key
+
+    # Remove the container automatically after it finishes.
+    restart: "no"
+
+# secrets:
+#   gcp-key:
+#     file: ./service-account-key.json

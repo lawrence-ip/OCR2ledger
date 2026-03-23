@@ -594,3 +594,140 @@ class TestCli:
         _, kwargs = mock_pipeline.call_args
         assert kwargs["save_json"] is True
         assert kwargs["json_output_folder"] == "/tmp/my_json"
+
+
+# ---------------------------------------------------------------------------
+# Tests: load_config / config-file integration
+# ---------------------------------------------------------------------------
+
+class TestLoadConfig:
+    def _write_config(self, path: Path, content: str) -> None:
+        path.write_text(content, encoding="utf-8")
+
+    def test_all_values_loaded(self, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        self._write_config(cfg_file, (
+            "[ocr2ledger]\n"
+            "input_folder = ./invoices\n"
+            "output_csv = results.csv\n"
+            "project_id = my-project\n"
+            "processor_id = abc123\n"
+            "location = eu\n"
+            "save_json = true\n"
+            "json_output_folder = my_json\n"
+        ))
+        cfg = pipeline.load_config(str(cfg_file))
+        assert cfg["input_folder"] == "./invoices"
+        assert cfg["output_csv"] == "results.csv"
+        assert cfg["project_id"] == "my-project"
+        assert cfg["processor_id"] == "abc123"
+        assert cfg["location"] == "eu"
+        assert cfg["save_json"] is True
+        assert cfg["json_output_folder"] == "my_json"
+
+    def test_optional_defaults_applied(self, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        self._write_config(cfg_file, (
+            "[ocr2ledger]\n"
+            "input_folder = ./pdfs\n"
+            "output_csv = out.csv\n"
+            "project_id = proj\n"
+            "processor_id = proc\n"
+        ))
+        cfg = pipeline.load_config(str(cfg_file))
+        assert cfg["location"] == "us"
+        assert cfg["save_json"] is False
+        assert cfg["json_output_folder"] == "json_output"
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            pipeline.load_config(str(tmp_path / "nonexistent.ini"))
+
+    def test_missing_section_raises(self, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        self._write_config(cfg_file, "[other_section]\nkey = value\n")
+        with pytest.raises(KeyError, match="ocr2ledger"):
+            pipeline.load_config(str(cfg_file))
+
+    def test_save_json_false_string(self, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        self._write_config(cfg_file, (
+            "[ocr2ledger]\n"
+            "input_folder = .\n"
+            "output_csv = o.csv\n"
+            "project_id = p\n"
+            "processor_id = x\n"
+            "save_json = false\n"
+        ))
+        cfg = pipeline.load_config(str(cfg_file))
+        assert cfg["save_json"] is False
+
+
+class TestCliWithConfigFile:
+    @mock.patch("pipeline.process_pdf_folder")
+    def test_config_file_used_when_no_cli_args(self, mock_pipeline, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        cfg_file.write_text(
+            "[ocr2ledger]\n"
+            f"input_folder = {tmp_path}/pdfs\n"
+            "output_csv = out.csv\n"
+            "project_id = cfg-proj\n"
+            "processor_id = cfg-proc\n"
+            "location = eu\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "pdfs").mkdir()
+
+        pipeline.main(["--config", str(cfg_file)])
+
+        mock_pipeline.assert_called_once_with(
+            input_folder=str(tmp_path / "pdfs"),
+            output_csv="out.csv",
+            project_id="cfg-proj",
+            location="eu",
+            processor_id="cfg-proc",
+            save_json=False,
+            json_output_folder="json_output",
+        )
+
+    @mock.patch("pipeline.process_pdf_folder")
+    def test_cli_args_override_config_file(self, mock_pipeline, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        cfg_file.write_text(
+            "[ocr2ledger]\n"
+            f"input_folder = {tmp_path}/pdfs\n"
+            "output_csv = from_config.csv\n"
+            "project_id = cfg-proj\n"
+            "processor_id = cfg-proc\n"
+            "location = eu\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "pdfs").mkdir()
+        cli_out = str(tmp_path / "cli_out.csv")
+
+        pipeline.main([
+            "--config", str(cfg_file),
+            "--location", "us",
+            "--project-id", "cli-proj",
+            str(tmp_path / "pdfs"),
+            cli_out,
+        ])
+
+        _, kwargs = mock_pipeline.call_args
+        assert kwargs["location"] == "us"
+        assert kwargs["project_id"] == "cli-proj"
+        assert kwargs["output_csv"] == cli_out
+
+    @mock.patch("pipeline.process_pdf_folder")
+    def test_missing_required_setting_raises_error(self, mock_pipeline, tmp_path):
+        cfg_file = tmp_path / "config.ini"
+        # project_id and processor_id are intentionally omitted
+        cfg_file.write_text(
+            "[ocr2ledger]\n"
+            "input_folder = ./pdfs\n"
+            "output_csv = out.csv\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit):
+            pipeline.main(["--config", str(cfg_file)])
+

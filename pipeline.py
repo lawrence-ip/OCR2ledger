@@ -6,22 +6,30 @@ Reads a folder of scanned PDFs, sends each one to Google Document AI for OCR /
 structured-data extraction, saves the raw JSON responses to disk, then parses
 every response into a single flat CSV file.
 
-Usage
------
+Usage (CLI)
+-----------
     python pipeline.py <input_folder> <output_csv> \\
         --project-id  <GCP_PROJECT_ID>   \\
         --location    us                  \\
         --processor-id <PROCESSOR_ID>     \\
         [--save-json] [--json-output-folder json_output]
+
+Usage (config file)
+-------------------
+    python pipeline.py --config config.ini
+
+    Where config.ini contains all required settings (see config.ini.example).
+    CLI arguments always override config-file values when both are provided.
 """
 
 import argparse
+import configparser
 import csv
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from google.api_core.client_options import ClientOptions
 from google.cloud import documentai_v1 as documentai
@@ -425,6 +433,54 @@ def process_pdf_folder(
 
 
 # ---------------------------------------------------------------------------
+# Config file helpers
+# ---------------------------------------------------------------------------
+
+_CONFIG_SECTION = "ocr2ledger"
+_CONFIG_DEFAULTS = {
+    "location": "us",
+    "save_json": "false",
+    "json_output_folder": "json_output",
+}
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load settings from an INI-style config file.
+
+    Returns a dict with keys matching the pipeline parameters.  Missing
+    optional keys fall back to the defaults defined in ``_CONFIG_DEFAULTS``.
+
+    Raises ``FileNotFoundError`` if *config_path* does not exist, and
+    ``KeyError`` if the ``[ocr2ledger]`` section is absent.
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    parser = configparser.ConfigParser(defaults=_CONFIG_DEFAULTS)
+    parser.read(path, encoding="utf-8")
+
+    if not parser.has_section(_CONFIG_SECTION):
+        raise KeyError(
+            f"Config file '{config_path}' is missing the [{_CONFIG_SECTION}] section."
+        )
+
+    section = parser[_CONFIG_SECTION]
+    return {
+        "input_folder": section.get("input_folder", fallback=""),
+        "output_csv": section.get("output_csv", fallback=""),
+        "project_id": section.get("project_id", fallback=""),
+        "location": section.get("location", fallback=_CONFIG_DEFAULTS["location"]),
+        "processor_id": section.get("processor_id", fallback=""),
+        "save_json": section.getboolean("save_json", fallback=False),
+        "json_output_folder": section.get(
+            "json_output_folder",
+            fallback=_CONFIG_DEFAULTS["json_output_folder"],
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -435,37 +491,52 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # Config file (mutually exclusive with positional args when fully specified)
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Path to an INI config file (see config.ini.example). "
+            "CLI arguments always override config-file values."
+        ),
+    )
     parser.add_argument(
         "input_folder",
+        nargs="?",
+        default=None,
         help="Directory containing the scanned PDF files to process.",
     )
     parser.add_argument(
         "output_csv",
+        nargs="?",
+        default=None,
         help="Path of the CSV file to create.",
     )
     parser.add_argument(
         "--project-id",
-        required=True,
+        default=None,
         help="Google Cloud project ID.",
     )
     parser.add_argument(
         "--location",
-        default="us",
+        default=None,
         help="Document AI API location (e.g. 'us' or 'eu').",
     )
     parser.add_argument(
         "--processor-id",
-        required=True,
+        default=None,
         help="Document AI processor ID.",
     )
     parser.add_argument(
         "--save-json",
         action="store_true",
+        default=None,
         help="Save the raw Document AI JSON responses alongside the CSV.",
     )
     parser.add_argument(
         "--json-output-folder",
-        default="json_output",
+        default=None,
         help="Directory in which to store raw JSON responses.",
     )
     return parser
@@ -473,14 +544,68 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = _build_arg_parser().parse_args(argv)
+
+    # ------------------------------------------------------------------
+    # Merge config file (base layer) with CLI args (override layer).
+    # ------------------------------------------------------------------
+    cfg: Dict[str, Any] = {
+        "input_folder": None,
+        "output_csv": None,
+        "project_id": None,
+        "location": "us",
+        "processor_id": None,
+        "save_json": False,
+        "json_output_folder": "json_output",
+    }
+
+    # Auto-detect config.ini in the current working directory when no
+    # explicit --config flag is given.
+    config_path = args.config
+    if config_path is None and Path("config.ini").exists():
+        config_path = "config.ini"
+
+    if config_path is not None:
+        cfg.update(load_config(config_path))
+
+    # CLI positional / optional args override config file.
+    if args.input_folder is not None:
+        cfg["input_folder"] = args.input_folder
+    if args.output_csv is not None:
+        cfg["output_csv"] = args.output_csv
+    if args.project_id is not None:
+        cfg["project_id"] = args.project_id
+    if args.location is not None:
+        cfg["location"] = args.location
+    if args.processor_id is not None:
+        cfg["processor_id"] = args.processor_id
+    # --save-json is a store_true flag; only treat it as an override when
+    # the user explicitly passed it on the command line.
+    if args.save_json:
+        cfg["save_json"] = True
+    if args.json_output_folder is not None:
+        cfg["json_output_folder"] = args.json_output_folder
+
+    # ------------------------------------------------------------------
+    # Validate that all required parameters are present.
+    # ------------------------------------------------------------------
+    missing: List[str] = []
+    for required in ("input_folder", "output_csv", "project_id", "processor_id"):
+        if not cfg.get(required):
+            missing.append(required)
+    if missing:
+        _build_arg_parser().error(
+            "The following required settings are missing (provide them via CLI "
+            f"arguments or a config file): {', '.join(missing)}"
+        )
+
     process_pdf_folder(
-        input_folder=args.input_folder,
-        output_csv=args.output_csv,
-        project_id=args.project_id,
-        location=args.location,
-        processor_id=args.processor_id,
-        save_json=args.save_json,
-        json_output_folder=args.json_output_folder,
+        input_folder=cfg["input_folder"],
+        output_csv=cfg["output_csv"],
+        project_id=cfg["project_id"],
+        location=cfg["location"],
+        processor_id=cfg["processor_id"],
+        save_json=cfg["save_json"],
+        json_output_folder=cfg["json_output_folder"],
     )
 
 
