@@ -307,20 +307,129 @@ class TestWriteCsv:
         rows = [
             {
                 "source_file": "a.pdf",
-                "type": "entity",
-                "key": "total",
-                "value": "42",
-                "normalized_value": "42.00",
-                "confidence": 0.9,
-                "page": 1,
+                "date": "2024-01-15",
+                "description": "Office Supplies",
+                "amount": "42.00",
             }
         ]
         pipeline.write_csv(rows, csv_path)
         with open(csv_path, newline="") as fh:
             content = list(csv.DictReader(fh))
         assert len(content) == 1
-        assert content[0]["key"] == "total"
-        assert content[0]["value"] == "42"
+        assert content[0]["date"] == "2024-01-15"
+        assert content[0]["description"] == "Office Supplies"
+        assert content[0]["amount"] == "42.00"
+
+
+# ---------------------------------------------------------------------------
+# Tests: normalize_field_key
+# ---------------------------------------------------------------------------
+
+class TestNormalizeFieldKey:
+    def test_date_synonyms(self):
+        assert pipeline.normalize_field_key("invoice_date") == "date"
+        assert pipeline.normalize_field_key("receipt_date") == "date"
+        assert pipeline.normalize_field_key("transaction_date") == "date"
+        assert pipeline.normalize_field_key("date") == "date"
+
+    def test_description_synonyms(self):
+        assert pipeline.normalize_field_key("vendor_name") == "description"
+        assert pipeline.normalize_field_key("merchant") == "description"
+        assert pipeline.normalize_field_key("memo") == "description"
+        assert pipeline.normalize_field_key("description") == "description"
+
+    def test_amount_synonyms(self):
+        assert pipeline.normalize_field_key("total_amount") == "amount"
+        assert pipeline.normalize_field_key("receipt_total") == "amount"
+        assert pipeline.normalize_field_key("total") == "amount"
+        assert pipeline.normalize_field_key("amount_due") == "amount"
+
+    def test_unknown_field_returns_none(self):
+        assert pipeline.normalize_field_key("invoice_id") is None
+        assert pipeline.normalize_field_key("unknown_field") is None
+        assert pipeline.normalize_field_key("") is None
+
+    def test_case_insensitive(self):
+        assert pipeline.normalize_field_key("TOTAL_AMOUNT") == "amount"
+        assert pipeline.normalize_field_key("Invoice_Date") == "date"
+        assert pipeline.normalize_field_key("Vendor_Name") == "description"
+
+    def test_trailing_colon_stripped(self):
+        assert pipeline.normalize_field_key("Date:") == "date"
+        assert pipeline.normalize_field_key("Total Amount:") == "amount"
+
+    def test_spaces_and_hyphens_treated_as_underscores(self):
+        assert pipeline.normalize_field_key("invoice date") == "date"
+        assert pipeline.normalize_field_key("vendor-name") == "description"
+
+
+# ---------------------------------------------------------------------------
+# Tests: rows_to_ledger_rows
+# ---------------------------------------------------------------------------
+
+def _make_raw_row(source_file: str, key: str, value: str, normalized_value: str = "") -> dict:
+    """Build a minimal raw extraction row for testing rows_to_ledger_rows."""
+    return {
+        "source_file": source_file,
+        "type": "entity",
+        "key": key,
+        "value": value,
+        "normalized_value": normalized_value,
+        "confidence": 0.9,
+        "page": 1,
+    }
+
+
+class TestRowsToLedgerRows:
+    def test_groups_by_source_file(self):
+        rows = [
+            _make_raw_row("a.pdf", "invoice_date", "2024-01-01"),
+            _make_raw_row("a.pdf", "total_amount", "$42.00", "42.00"),
+            _make_raw_row("b.pdf", "receipt_date", "2024-02-01"),
+        ]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert len(result) == 2
+        file_a = next(r for r in result if r["source_file"] == "a.pdf")
+        assert file_a["date"] == "2024-01-01"
+        assert file_a["amount"] == "42.00"  # normalized_value preferred
+
+    def test_normalized_value_preferred_over_raw(self):
+        rows = [_make_raw_row("a.pdf", "total_amount", "$100.00", "100.00")]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert result[0]["amount"] == "100.00"
+
+    def test_falls_back_to_raw_value_when_no_normalized(self):
+        rows = [_make_raw_row("a.pdf", "invoice_date", "01/15/2024")]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert result[0]["date"] == "01/15/2024"
+
+    def test_first_match_wins(self):
+        rows = [
+            _make_raw_row("a.pdf", "total", "100"),
+            _make_raw_row("a.pdf", "total_amount", "200"),
+        ]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert result[0]["amount"] == "100"
+
+    def test_unrecognized_fields_yield_empty_ledger_columns(self):
+        rows = [_make_raw_row("a.pdf", "invoice_id", "INV-001")]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert result[0]["date"] == ""
+        assert result[0]["description"] == ""
+        assert result[0]["amount"] == ""
+
+    def test_empty_rows_returns_empty_list(self):
+        assert pipeline.rows_to_ledger_rows([]) == []
+
+    def test_ledger_row_has_correct_keys(self):
+        rows = [_make_raw_row("a.pdf", "vendor_name", "ACME Corp")]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert set(result[0].keys()) == {"source_file", "date", "description", "amount"}
+
+    def test_description_from_vendor_name(self):
+        rows = [_make_raw_row("a.pdf", "vendor_name", "ACME Corp")]
+        result = pipeline.rows_to_ledger_rows(rows)
+        assert result[0]["description"] == "ACME Corp"
 
 
 # ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 from google.api_core.client_options import ClientOptions
 from google.cloud import documentai_v1 as documentai
@@ -199,6 +199,129 @@ def document_to_rows(
 
 
 # ---------------------------------------------------------------------------
+# Ledger field normalisation
+# ---------------------------------------------------------------------------
+
+#: Maps standardised ledger column names to the set of raw key variants that
+#: should be treated as that column.  Matching is case-insensitive and ignores
+#: trailing colons, extra whitespace, and treats spaces / hyphens as
+#: underscores (see :func:`normalize_field_key`).
+FIELD_SYNONYMS: Dict[str, Set[str]] = {
+    "date": {
+        "date",
+        "invoice_date",
+        "receipt_date",
+        "transaction_date",
+        "purchase_date",
+        "payment_date",
+        "service_date",
+        "bill_date",
+        "order_date",
+        "issue_date",
+        "due_date",
+        "delivery_date",
+        "posting_date",
+        "value_date",
+    },
+    "description": {
+        "description",
+        "item_description",
+        "line_item",
+        "memo",
+        "note",
+        "notes",
+        "narrative",
+        "details",
+        "remarks",
+        "subject",
+        "vendor_name",
+        "supplier_name",
+        "supplier",
+        "merchant_name",
+        "merchant",
+        "payee",
+        "payee_name",
+        "store_name",
+        "business_name",
+        "company_name",
+        "retailer",
+        "seller",
+        "item_name",
+        "product_name",
+        "service_name",
+        "expense_type",
+        "category",
+    },
+    "amount": {
+        "amount",
+        "total_amount",
+        "receipt_total",
+        "invoice_total",
+        "total_due",
+        "amount_due",
+        "net_amount",
+        "gross_amount",
+        "payment_amount",
+        "total",
+        "subtotal",
+        "grand_total",
+        "balance_due",
+        "price",
+        "cost",
+        "charge",
+        "fee",
+        "net_total",
+        "pretax_amount",
+        "tip_amount",
+    },
+}
+
+
+def normalize_field_key(key: str) -> Optional[str]:
+    """Map a raw extracted field key to a standardised ledger column name.
+
+    Returns one of ``"date"``, ``"description"``, or ``"amount"``,
+    or ``None`` if the key does not correspond to any known ledger field.
+
+    Matching is case-insensitive and ignores surrounding whitespace, trailing
+    colons, and treats spaces or hyphens as underscores so that, for example,
+    ``"Invoice Date:"`` and ``"invoice_date"`` both map to ``"date"``.
+    """
+    canonical = key.lower().strip().rstrip(":").replace(" ", "_").replace("-", "_")
+    for standard_name, synonyms in FIELD_SYNONYMS.items():
+        if canonical in synonyms:
+            return standard_name
+    return None
+
+
+def rows_to_ledger_rows(rows: List[dict]) -> List[dict]:
+    """Aggregate per-field extraction rows into per-document ledger rows.
+
+    Each unique source file becomes exactly one output row containing
+    ``source_file``, ``date``, ``description``, and ``amount`` columns.
+    Fields are populated from the *first* extracted row whose key maps to that
+    column via :func:`normalize_field_key`.  When a ``normalized_value`` is
+    available it is preferred over the raw ``value``.
+    """
+    seen: Dict[str, dict] = {}
+    for row in rows:
+        src = row["source_file"]
+        if src not in seen:
+            seen[src] = {
+                "source_file": src,
+                "date": "",
+                "description": "",
+                "amount": "",
+            }
+        standard = normalize_field_key(row.get("key", ""))
+        if standard and not seen[src][standard]:
+            val = row.get("normalized_value") or row.get("value", "")
+            if val:
+                seen[src][standard] = val
+    return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
 # JSON persistence helpers
 # ---------------------------------------------------------------------------
 
@@ -228,19 +351,18 @@ def load_document_json(json_path: str) -> documentai.Document:
 
 CSV_FIELDNAMES = [
     "source_file",
-    "type",
-    "key",
-    "value",
-    "normalized_value",
-    "confidence",
-    "page",
+    "date",
+    "description",
+    "amount",
 ]
 
 
 def write_csv(rows: List[dict], output_csv: str) -> None:
-    """Write *rows* to *output_csv* using the standard CSV dialect."""
+    """Write *rows* to *output_csv* as a ledger CSV (date, description, amount)."""
     with open(output_csv, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDNAMES)
+        writer = csv.DictWriter(
+            fh, fieldnames=CSV_FIELDNAMES, extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -296,9 +418,10 @@ def process_pdf_folder(
             print(f"ERROR processing {pdf_path.name}:", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
-    write_csv(all_rows, output_csv)
-    print(f"\nCSV written to '{output_csv}'  ({len(all_rows)} total row(s))")
-    return len(all_rows)
+    ledger_rows = rows_to_ledger_rows(all_rows)
+    write_csv(ledger_rows, output_csv)
+    print(f"\nCSV written to '{output_csv}'  ({len(ledger_rows)} total row(s))")
+    return len(ledger_rows)
 
 
 # ---------------------------------------------------------------------------
