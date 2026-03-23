@@ -23,6 +23,9 @@ json_output/
 *.json
 !tests/fixtures/*.json
 
+# Config file with real credentials — use config.ini.example as a template
+config.ini
+
 # IDE / OS
 .idea/
 .vscode/
@@ -33,3 +36,6 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# PyInstaller build artefacts
+*.spec

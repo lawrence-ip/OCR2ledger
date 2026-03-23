@@ -1,0 +1,37 @@
+; OCR2Ledger configuration file
+; ===============================
+; Copy this file to config.ini and fill in your values.
+; The program automatically reads config.ini from the current working directory.
+; You can also specify a custom path with:  --config /path/to/myconfig.ini
+;
+; All settings in this file can be overridden by passing the equivalent
+; command-line argument (see pipeline.py --help).
+
+[ocr2ledger]
+
+; ---- Input / Output --------------------------------------------------------
+
+; Directory containing the scanned PDF files to process.
+input_folder = ./invoices
+
+; Path of the CSV file to create.
+output_csv = output.csv
+
+; ---- Google Cloud credentials ----------------------------------------------
+
+; Your Google Cloud project ID.
+project_id = my-gcp-project
+
+; Document AI processor ID (found in the Google Cloud Console).
+processor_id = 1a2b3c4d5e6f
+
+; Document AI API location: "us" or "eu" (default: us).
+location = us
+
+; ---- Optional settings -----------------------------------------------------
+
+; Set to "true" to save the raw Document AI JSON response for each PDF.
+save_json = false
+
+; Directory where raw JSON responses are stored (only used when save_json = true).
+json_output_folder = json_output
